@@ -9,8 +9,8 @@
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
+#include <fcntl.h>
 
-#include "process.h"
 #include "tokenizer.h"
 
 /* Convenience macro to silence compiler warnings about unused function parameters. */
@@ -64,8 +64,8 @@ int cmd_exit(unused struct tokens *tokens) {
 
 int cmd_pwd(unused struct tokens *tokens) {
   if(tokens->tokens_length > 1){
-    printf("pwd does not take command line arguments\n");
-    return 1;
+      printf("pwd does not take command line arguments\n");
+      return 1;
   }
   else{
     char buf[1024];
@@ -87,6 +87,103 @@ int cmd_cd(unused struct tokens *tokens) {
       perror("cd error");
     return 1;
   }
+}
+
+int create_env_path(char ***env_arr_pointer)
+{
+  char *env_str = getenv("PATH");
+  int start=0,end=0,count=0;
+  while(env_str[end] != '\0'){
+    if(env_str[end] == ':'){
+      char *path = (char *) malloc(end-start+1);
+      memcpy(path,env_str+start,end-start);
+      path[end] = '\0';
+      *env_arr_pointer = (char **) realloc(*env_arr_pointer, sizeof(char *) * (count+1));
+      if(*env_arr_pointer == NULL)
+        printf("null env arr pointer\n");
+      (*env_arr_pointer)[count++] = path;
+      start=end+1;
+    }
+    ++end;
+  }
+  return count;
+}
+
+char *calc_prog_path(unused struct tokens *tokens){
+  char *prog_full_name = (char *) malloc(sizeof(char)*200);
+  if(tokens->tokens[0][0] == '/')
+    strcpy(prog_full_name,tokens->tokens[0]);
+  else{
+    char **env_path = NULL;
+    int size = create_env_path(&env_path);
+    for(int i=0;i<size;i++)
+    {
+      strcat(env_path[i],"/");
+      strcpy(prog_full_name,(strcat(env_path[i],tokens->tokens[0])));
+      if(access(prog_full_name,F_OK|X_OK) != -1)
+        break;
+    }
+  }
+  return prog_full_name;
+}
+
+int exec_program(unused struct tokens *tokens){
+  printf("pid inside exec program is %d\n",getpid());
+  int status;
+  char *prog_full_name = calc_prog_path(tokens);
+
+  int redirect_fd = -1, token_index = -1;
+  char *redirect_file = NULL;
+  for(int i=0;i<tokens->tokens_length;++i){
+    if(strcmp(tokens->tokens[i],"<")==0){
+      redirect_fd = 0;
+      token_index = i;
+      redirect_file = tokens->tokens[i+1];
+      break;
+    }
+    else if(strcmp(tokens->tokens[i],">")==0){
+      redirect_fd = 1;
+      token_index=i;
+      redirect_file = tokens->tokens[i+1];
+      break;
+    }
+  }
+  pid_t cpid = fork();
+  if(cpid > 0){
+    printf("parent pid is %d\n",getpid());
+    printf("parent pg id is %d\n",getpgid(0));
+    setpgid(getpid(),0);
+    wait(&status);
+    tcsetpgrp(shell_terminal,shell_pgid);
+  }
+  else if(cpid == 0){
+    printf("child pid is %d\n",getpid());
+    printf("child pg id before set is %d\n",getpgid(0));
+    setpgid(getpid(),0);
+    printf("child pg id after set is %d\n",getpgid(0));
+    tcsetpgrp(shell_terminal,getpgid(0));
+    if(redirect_fd != -1 && redirect_file != NULL){
+      int fd = open(redirect_file,O_RDWR);
+      if (fd == -1){
+        perror("Redirect error");
+        exit(0);
+      }
+      dup2(fd,redirect_fd);
+      close(fd);
+    }
+
+    tokens->tokens = (char**) realloc(tokens->tokens, sizeof(char *) * (tokens->tokens_length + 1));
+    tokens->tokens[token_index] = NULL;
+    int exec_status = execv(prog_full_name,tokens->tokens);
+    if(exec_status == -1)
+      perror("exec error");
+    printf("After execv in child\n");
+  }
+  else{
+    perror("Exec program error");
+    return 0;
+  }
+  return 1;
 }
 
 /* Looks up the built-in command, if it exists. */
@@ -114,11 +211,12 @@ void init_shell() {
 
     /* Saves the shell's process id */
     shell_pgid = getpid();
-
-    if(setpgid(shell_pgid, shell_pgid) < 0){
-      perror("Couldn't put shell in its own process group\n");
-      exit(1);
+    printf("our shell pgid is %d\n",getpgid(0));
+    printf("our shell pid is %d\n",getpid());
+    if(setpgid(shell_pgid,shell_pgid) < 0){
+      perror("set shell pgrp error");
     }
+    printf("our shell pgid after set is %d\n",getpgid(0));
 
     signal(SIGTSTP, SIG_IGN);
     signal(SIGINT, SIG_IGN);
@@ -127,19 +225,11 @@ void init_shell() {
     signal(SIGTTOU, SIG_IGN);
     signal(SIGCHLD, SIG_IGN);
 
+
+
+
     /* Take control of the terminal */
     tcsetpgrp(shell_terminal, shell_pgid);
-
-    printf("shell pid is %d\n",shell_pgid);
-
-    first_process = (process *) malloc( sizeof(process) );
-    first_process->pid = getpid();
-    first_process->prog_name = NULL;
-    first_process->stdin = STDIN_FILENO;
-    first_process->stdout = STDOUT_FILENO;
-    first_process->background=0;
-    first_process->completed=0;
-    first_process->next = NULL;
 
     /* Save the current termios to a variable, so it can be restored later. */
     tcgetattr(shell_terminal, &shell_tmodes);
@@ -166,34 +256,9 @@ int main(unused int argc, unused char *argv[]) {
     if (fundex >= 0) {
       cmd_table[fundex].fun(tokens);
     } else {
-      printf("shell tcgetpgrp is %d\n",tcgetpgrp(0));
-      int status;
-      process *p = (process *) malloc(sizeof(process));
-      p->argv = tokens->tokens;
-      p->argc = tokens->tokens_length;
-      p->completed = 0;
-      p->stdin = STDIN_FILENO;
-      p->stdout = STDOUT_FILENO;
-
-      process_check_fg_bg(p);
-      p->prog_name = calc_prog_path(p->argv,p->argc);
-      process_redirect_io(p);
-      add_process(p);
-
-      pid_t cpid = fork();
-      if(cpid > 0){
-        p->pid = cpid;
-        if(!p->background){
-          wait(&status);
-          tcsetpgrp(0,shell_pgid);
-          printf("tcgetpgrp after wait is %d\n",tcgetpgrp(0));
-        }
-      }
-      else if(cpid == 0){
-        p->pid = getpid();
-        launch_process(p);
-      }
-      printf("tcgetpgrp at fork end is %d\n",tcgetpgrp(0));
+      /* REPLACE this to run commands as programs.
+      fprintf(stdout, "This shell doesn't know how to run programs.\n");*/
+      exec_program(tokens);
     }
 
     if (shell_is_interactive)
