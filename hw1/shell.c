@@ -32,6 +32,12 @@ int cmd_exit(struct tokens *tokens);
 int cmd_help(struct tokens *tokens);
 int cmd_pwd(struct tokens *tokens);
 int cmd_cd(struct tokens *tokens);
+int cmd_wait(struct tokens *tokens);
+int cmd_fg(struct tokens *tokens);
+int cmd_bg(struct tokens *tokens);
+
+void update_status();
+int background_processes_complete();
 
 /* Built-in command functions take token array (see parse.h) and return int */
 typedef int cmd_fun_t(struct tokens *tokens);
@@ -47,7 +53,10 @@ fun_desc_t cmd_table[] = {
   {cmd_help, "?", "show this help menu"},
   {cmd_exit, "exit", "exit the command shell"},
   {cmd_pwd, "pwd", "print the current working directory path"},
-  {cmd_cd, "cd", "change current working directory to specified path"}
+  {cmd_cd, "cd", "change current working directory to specified path"},
+  {cmd_wait, "wait", "wait for all background processes to complete"},
+  {cmd_fg, "fg", "bring specified program with pid to terminal foreground"},
+  {cmd_bg,"bg", "continue execution of specified program with pid in background"}
 };
 
 /* Prints a helpful description for the given command */
@@ -89,6 +98,75 @@ int cmd_cd(unused struct tokens *tokens) {
   }
 }
 
+int cmd_wait(unused struct tokens *tokens){
+  if(tokens->tokens_length != 1){
+    printf("wait does not take any cmd line arguments\n");
+    return 1;
+  }
+  else{
+    int count = 0;
+    while(!background_processes_complete()){
+      if(count>100){
+        printf("backbround count break\n");
+        return 1;
+      }
+      update_status();
+    }
+  return 1;
+  }
+}
+
+int cmd_fg(unused struct tokens *tokens){
+  pid_t pid;
+  if(tokens->tokens_length > 1){
+    pid = strtol(tokens->tokens[1],NULL,10);
+  }
+  else
+    pid = -1;
+  process *p;
+  for(p=first_process;p->next!=NULL;p=p->next){
+    if(p->pid == pid)
+      break;
+  }
+  put_process_in_foreground(p);
+  return 1;
+}
+
+int cmd_bg(unused struct tokens *tokens){
+  pid_t pid;
+  if(tokens->tokens_length > 1){
+    pid = strtol(tokens->tokens[1],NULL,10);
+  }
+  else
+    pid = -1;
+  process *p;
+  for(p=first_process;p->next!=NULL;p=p->next){
+    if(p->pid == pid)
+      break;
+  }
+  put_process_in_background(p);
+  return 1;
+}
+
+int background_processes_complete(){
+  process *curr_proc;
+  for(curr_proc=first_process;curr_proc!=NULL;curr_proc=curr_proc->next){
+    if(curr_proc->completed == 0)
+      return 0;
+  }
+  return 1;
+}
+
+void update_status(){
+  int status;
+  pid_t pid;
+  do{
+    pid = waitpid(WAIT_ANY,&status,WNOHANG||WUNTRACED);
+    if(pid < 0)
+      perror("pid update status error");
+  }while(!mark_process_complete(pid,status));
+}
+
 /* Looks up the built-in command, if it exists. */
 int lookup(char cmd[]) {
   for (unsigned int i = 0; i < sizeof(cmd_table) / sizeof(fun_desc_t); i++)
@@ -125,7 +203,6 @@ void init_shell() {
     signal(SIGQUIT, SIG_IGN);
     signal(SIGTTIN, SIG_IGN);
     signal(SIGTTOU, SIG_IGN);
-    signal(SIGCHLD, SIG_IGN);
 
     /* Take control of the terminal */
     tcsetpgrp(shell_terminal, shell_pgid);
@@ -138,7 +215,7 @@ void init_shell() {
     first_process->stdin = STDIN_FILENO;
     first_process->stdout = STDOUT_FILENO;
     first_process->background=0;
-    first_process->completed=0;
+    first_process->completed=1;
     first_process->next = NULL;
 
     /* Save the current termios to a variable, so it can be restored later. */
@@ -167,13 +244,13 @@ int main(unused int argc, unused char *argv[]) {
       cmd_table[fundex].fun(tokens);
     } else {
       printf("shell tcgetpgrp is %d\n",tcgetpgrp(0));
-      int status;
       process *p = (process *) malloc(sizeof(process));
       p->argv = tokens->tokens;
       p->argc = tokens->tokens_length;
       p->completed = 0;
       p->stdin = STDIN_FILENO;
       p->stdout = STDOUT_FILENO;
+      p->next = NULL;
 
       process_check_fg_bg(p);
       p->prog_name = calc_prog_path(p->argv,p->argc);
@@ -182,18 +259,17 @@ int main(unused int argc, unused char *argv[]) {
 
       pid_t cpid = fork();
       if(cpid > 0){
+        setpgid(cpid,cpid);
         p->pid = cpid;
-        if(!p->background){
-          wait(&status);
-          tcsetpgrp(0,shell_pgid);
-          printf("tcgetpgrp after wait is %d\n",tcgetpgrp(0));
-        }
+        if(!p->background)
+          put_process_in_foreground(p);
       }
       else if(cpid == 0){
         p->pid = getpid();
         launch_process(p);
       }
-      printf("tcgetpgrp at fork end is %d\n",tcgetpgrp(0));
+      update_status();
+      printf("tcgetpgrp at fork end is %d,shell is %d\n",tcgetpgrp(0),shell_pgid);
     }
 
     if (shell_is_interactive)

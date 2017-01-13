@@ -11,18 +11,33 @@
 #include "process.h"
 
 void add_process(process *p){
-  while(first_process->next != NULL){
-    first_process=first_process->next;
+  process *curr_proc = first_process;
+  while(curr_proc->next != NULL){
+    curr_proc=curr_proc->next;
   }
-  first_process->next=p;
+  printf("Adding process with name %s",p->argv[0]);
+  curr_proc->next=p;
+}
+
+int mark_process_complete(pid_t pid, int status){
+  if(pid > 0){
+    printf("pid in mark process is %d\n",pid);
+    process *curr_process;
+    for(curr_process=first_process;curr_process!=NULL;curr_process=curr_process->next){
+      if(curr_process->pid == pid){
+        curr_process->completed = 1;
+        return 0;
+      }
+    }
+  }
+  return -1;
 }
 
 void launch_process(process *p){
 
+  printf("child==> pid is %d\n",getpid());
   setpgid(getpid(),0);
-  if(!p->background)
-    tcsetpgrp(0,getpgid(0));
-  printf("tcgetprp in launch process is %d\n",tcgetpgrp(0));
+  printf("child==> tcgetpgrp in launch process is %d\n",tcgetpgrp(0));
   signal(SIGTSTP, SIG_DFL);
   signal(SIGINT, SIG_DFL);
   signal(SIGQUIT, SIG_DFL);
@@ -37,7 +52,6 @@ void launch_process(process *p){
   if(p->stdout != STDOUT_FILENO){
     dup2(p->stdout,STDOUT_FILENO);
   }
-  printf("child pid is %d\n",getpid());
   int exec_status = execv(p->prog_name,p->argv);
   if(exec_status == -1){
     printf("exec name is %s\n",p->prog_name);
@@ -48,10 +62,20 @@ void launch_process(process *p){
   }
 }
 
+void put_process_in_background(process *p){
+  if(kill (-p->pid, SIGCONT) < 0)
+    perror("kill (SIGCONT)");
+}
+
 void put_process_in_foreground(process *p){
   int status;
+  printf("put process in fg %d\n",p->pid);
   tcsetpgrp(STDIN_FILENO,p->pid);
-  waitpid(WAIT_ANY, &status, WUNTRACED);
+  int pid = waitpid(WAIT_ANY, &status, WUNTRACED);
+  if(pid < 0)
+    perror("pid error\n");
+  printf("child==>after wait for process %d,pid ret =%d \n",tcgetpgrp(0),pid);
+  p->completed = 1;
   tcsetpgrp(STDIN_FILENO,first_process->pid);
 }
 
